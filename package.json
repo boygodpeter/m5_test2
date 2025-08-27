@@ -28,6 +28,16 @@
           "group": "navigation"
         }
       ]
+    },
+    "configuration": {
+      "title": "Gemini",
+      "properties": {
+        "gemini.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Google AI Studio API key for Gemini. Leave blank to use environment variable GEMINI_API_KEY."
+        }
+      }
     }
   },
   "scripts": {
@@ -58,6 +68,7 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "flowchart.js": "^1.18.0",
     "mermaid": "^11.8.1"
   }

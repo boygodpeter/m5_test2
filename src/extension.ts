@@ -14,7 +14,6 @@ let lineToNodeMap: Map<number, string[]> = new Map();
 let nodeOrder: string[] = [];
 
 export function activate(context: vscode.ExtensionContext) {
-    
     let generateDisposable = vscode.commands.registerCommand('m5-test2.generate', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
@@ -32,7 +31,7 @@ export function activate(context: vscode.ExtensionContext) {
         
         try {
             //使用 Python AST 來解析程式碼，並獲取每一行的對應關係
-            const { mermaidCode, lineMapping, nodeSequence } = await parsePythonWithAST(code);
+            const { mermaidCode, lineMapping, nodeSequence, nodeMeta } = await parsePythonWithAST(code);
             
             console.log('Generated Mermaid code:');
             console.log(mermaidCode);
@@ -44,7 +43,7 @@ export function activate(context: vscode.ExtensionContext) {
             console.log('Parsed line to node map:', Array.from(lineToNodeMap.entries()));
             
             //解析節點順序（新增）
-            nodeOrder = parseNodeSequence(nodeSequence);
+            nodeOrder = await parseNodeSequence(nodeSequence, nodeMeta, code);
             console.log('Node order:', nodeOrder);
             
             //創建或更新 Webview 面板
@@ -57,7 +56,9 @@ export function activate(context: vscode.ExtensionContext) {
                     vscode.ViewColumn.Two,
                     {
                         enableScripts: true,
-                        retainContextWhenHidden: true
+                        retainContextWhenHidden: true,
+                        // Allow loading local files from your extension
+                        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')],
                     }
                 );
 
@@ -66,7 +67,13 @@ export function activate(context: vscode.ExtensionContext) {
                 });
             }
 
-            currentPanel.webview.html = getWebviewContent(mermaidCode, nodeOrder);
+            // load the webview html from templates
+            currentPanel.webview.html = await getWebviewHtmlExternal(
+                currentPanel.webview,
+                context,
+                mermaidCode,
+                nodeOrder
+            );
             
             //監聽來自 webview 的消息
             currentPanel.webview.onDidReceiveMessage(
@@ -152,14 +159,213 @@ function parseLineMapping(mappingStr: string): Map<number, string[]> {
 }
 
 // 解析節點順序（新增）
-function parseNodeSequence(sequenceStr: string): string[] {
+async function parseNodeSequence(sequenceStr: string, nodeMeta: string, fullCode: string): Promise<string[]> {
+    let sequence : string[] = [];
     try {
-        const sequence = JSON.parse(sequenceStr);
-        return sequence as string[];
+        sequence = JSON.parse(sequenceStr);
     } catch (e) {
         console.error('Error parsing node sequence:', e);
-        return [];
+        return ['Error parsing node sequence'];
     }
+    
+    // ---- Build derived maps from nodeMeta ----
+    // Build mapping between: nodeID, label, Lineno
+    const nodeMetaObj = parseNodeMeta(nodeMeta);
+
+    const nodeIdToLine = new Map<string, number | null>();
+    const nodeIdToLabel = new Map<string, string>();
+
+    for (const [id, m] of Object.entries(nodeMetaObj)) {
+        nodeIdToLine.set(id, m.line ?? null);
+        nodeIdToLabel.set(id, m.label);
+    }
+
+    // Ready-to-send, execution-ordered view (for LLM or whatever)
+    const orderedForLLM = sequence.map((tmpNodeId) => ({
+        nodeId: tmpNodeId,
+        line: nodeIdToLine.get(tmpNodeId) ?? null,
+        statement: nodeIdToLabel.get(tmpNodeId) ?? (tmpNodeId === 'Start' || tmpNodeId === 'End' ? tmpNodeId : '')
+    }));
+    // console.log('orderedForLLM:', orderedForLLM);
+
+    // interact with LLM
+    let sortResult: string[] = sequence;// default to be old version, if LLM failed
+    sortResult = await askGeminiSortCode(orderedForLLM, fullCode);
+    return sortResult;
+}
+
+async function askGeminiSortCode(orderedForLLM: any, fullCode: string) : Promise<string[]>{
+// 1. 將 orderForLLM stringify, 合併成一個 Prompt
+// 2. pass 這個字串給 gemini
+// 3. 將 sorting 完成的結果存入這邊
+// 4. 讀取 sorting 過後的 nodeID
+// 5. 修改 'parseNodeSequence' function，可以從這邊接回去原本的接口
+//
+// 備註: animation 的邏輯是寫在 media/flowview.html 裡面的，extension.ts 後端負責 post 訊息給 webview 前端的 scripts
+
+    // Step 1: 將 orderForLLM stringify, 合併成一個 Prompt
+    let systemPrompt :string = 
+`Task: Determine the actual execution path for the code below and emit it as JSON.
+
+Rules:
+- Output MUST be valid JSON (UTF-8, double quotes, no trailing commas).
+- Include every statement that is actually executed in order.
+- For condition nodes, include the boolean result.
+- Include any printed outputs in the order they occur.
+- Do not include nodes that are never reached.
+
+Schema (exact keys):
+{
+  "executed_orders": number[],             // order indices from my node list, in execution order
+}`
+    ;
+    let jsonObj :any = { ordered: orderedForLLM };
+    const userPrompt = getFullPromptString(systemPrompt, fullCode, jsonObj);
+
+    // console.log('userPrompt:');
+    // console.log(userPrompt);
+
+    // Step 2: pass 這個字串給 gemini
+    // Step 3: 將 sorting 完成的結果存入這邊
+    let rawSortResult : string = "";
+    try {
+        let modelName : string = 'gemini-2.0-flash-lite';
+        const genAI = await getGemini();
+        const model = genAI.getGenerativeModel({ model: modelName });
+
+        const result = await model.generateContent(userPrompt);
+        rawSortResult = result.response.text();
+        console.log('raw Gemini response:', rawSortResult);
+    } catch (err: any) {
+        vscode.window.showErrorMessage(`Gemini error: ${err?.message || err}`);
+        return ["Gemini error"];
+    }
+
+    // Step 4: 讀取 sorting 過後的 nodeID
+    let iterableResult: { executed_orders: number[] };
+    try{
+        iterableResult = parseLLMJson(rawSortResult);
+    } catch (e) {
+        console.error("Failed to parse JSON from LLM:", rawSortResult);
+        return ["Failed to parse JSON from Gemini"];
+    }
+    
+    // Step 5: 想辦法接入 'parseNodeSequence' function，可以從這邊接回去原本的接口
+    // function parseNodeSequence(sequenceStr: string): string[] {...}
+    // return string[]
+    //         |------->> ['Start', 'node1', 'node2', ..., 'node39', 'End']
+    let returnStringArray : string[] = [];
+    returnStringArray.push('Start');
+    for (const tmpNodeID of iterableResult.executed_orders) {
+        returnStringArray.push("node" + tmpNodeID);
+    }
+    returnStringArray.push('End');
+
+    return returnStringArray;
+}
+
+function getFullPromptString(systemPrompt: string, fullCode: string, jsonObj: any, ) {
+    const userPrompt = [
+        systemPrompt,
+        '',
+        'Full code:',
+        '```python',
+        fullCode,
+        '```',
+        '',
+        'JSON payload follows (triple backticks):',
+        '```json',
+        JSON.stringify(jsonObj, null, 2),
+        '```'
+    ].join('\n');
+    return userPrompt;
+}
+
+// If your VS Code runtime < Node 18, uncomment next line to polyfill fetch:
+// import { fetch } from 'undici'; (and then: (globalThis as any).fetch = fetch;)
+
+// Read the key & create a tiny Gemini client (in extension.ts)
+async function getGemini() {
+    // ESM-only SDK -> dynamic import in CJS
+    const { GoogleGenerativeAI } = await import('@google/generative-ai');
+    const apiKey =
+        vscode.workspace.getConfiguration().get<string>('gemini.apiKey') ||
+        process.env.GEMINI_API_KEY;
+    // console.log("API key:", apiKey);
+
+    if (!apiKey) {
+        console.error("Missing Gemini API key. Set `gemini.apiKey` in Settings or export GEMINI_API_KEY.");
+        throw new Error(
+            "Missing Gemini API key. Set `gemini.apiKey` in Settings or export GEMINI_API_KEY."
+        );
+    }
+
+    return new GoogleGenerativeAI(apiKey);
+}
+
+export function parseLLMJson(raw: string) {
+  // 1) trim BOM/whitespace
+  let s = raw.trim();
+
+  // 2) If fenced code block, extract inner
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fence) {s = fence[1].trim();}
+
+  // 3) If there’s stray prose, try to grab the first JSON object
+  //    (balanced-brace scan to avoid false positives)
+  if (!(s.startsWith('{') || s.startsWith('['))) {
+    const i = s.indexOf('{');
+    if (i >= 0) {s = s.slice(i);}
+  }
+  // Find the matching closing brace for the first top-level JSON object
+  const obj = extractFirstJsonValue(s);
+  if (obj) {return JSON.parse(obj);}
+
+  // Fallback: last attempt
+  return JSON.parse(s);
+}
+
+// Helper: extract the first top-level JSON value ({...} or [...])
+function extractFirstJsonValue(s: string): string | null {
+    let depth = 0;
+    let start = -1;
+    let inStr = false;
+    let esc = false;
+    let quote: '"' | "'" | null = null;
+
+    for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+
+        if (inStr) {
+        if (esc) { esc = false; continue; }
+        if (c === '\\') { esc = true; continue; }
+        if (c === quote) { inStr = false; quote = null; }
+            continue;
+        }
+
+        if (c === '"' || c === "'") { inStr = true; quote = c as '"' | "'"; continue; }
+        if (c === '{' || c === '[') {
+            if (depth === 0) {start = i;}
+            depth++;
+        } else if (c === '}' || c === ']') {
+            depth--;
+            if (depth === 0 && start >= 0) {return s.slice(start, i + 1);}
+        }
+    }
+    return null;
+}
+
+
+
+type NodeMeta = Record<string, { 
+    label: string;
+    escaped_label: string; 
+    line: number | null 
+}>;
+
+function parseNodeMeta(metaStr: string): NodeMeta {
+  try { return JSON.parse(metaStr) as NodeMeta; }
+  catch (e) { console.error('Error parsing node meta:', e); return {}; }
 }
 
 // 生成 Python AST 解析器類別
@@ -176,6 +382,7 @@ class FlowchartGenerator(ast.NodeVisitor):
     
     def __init__(self):
         self.node_id = 0
+        self.node_meta = {}          # nodeId -> { "label": str, "escaped_label": str, "line": int|None }
         self.mermaid_lines = ['flowchart TD']
         self.current_node = 'Start'  #開始的節點
         self.function_defs = {}      #存放function def的節點資訊
@@ -220,6 +427,14 @@ class FlowchartGenerator(ast.NodeVisitor):
     def add_node(self, node_id, label, shape='rectangle', style=None, source_node=None):
         """添加節點到 Mermaid 圖"""
         escaped_label = self.escape_text(label)
+
+        # record node_meta data
+        source_line = getattr(source_node, 'lineno', None)
+        self.node_meta[node_id] = {
+            "label": label,  # unescaped, for LLM / mapping
+            "escaped_label": escaped_label,  # what Mermaid uses
+            "line": source_line
+        }
         
         # 添加行號映射
         if source_node:
@@ -249,6 +464,10 @@ class FlowchartGenerator(ast.NodeVisitor):
         
         # 添加點擊事件
         self.mermaid_lines.append(f'    click {node_id} nodeClick')
+    
+    # getter of node meta data
+    def get_node_meta(self):
+        return json.dumps(self.node_meta)
     
     def add_edge(self, from_node, to_node, label=None):
         """添加邊到 Mermaid 圖"""
@@ -1025,6 +1244,10 @@ try:
     # 輸出節點順序（新增）
     node_sequence = generator.get_node_sequence()
     print(node_sequence)
+
+    # output the node meta data
+    print("---NODE_META---")
+    print(generator.get_node_meta())
     
     # 錯誤測試
     print(f"Line mapping details: {generator.line_to_node}", file=sys.stderr)
@@ -1048,7 +1271,12 @@ except Exception as e:
 }
 
 // 使用 Python 的 AST 模組來解析程式碼
-function parsePythonWithAST(code: string): Promise<{mermaidCode: string, lineMapping: string, nodeSequence: string}> {
+function parsePythonWithAST(code: string): Promise<{
+    mermaidCode: string, 
+    lineMapping: string, 
+    nodeSequence: string,
+    nodeMeta: string
+}> {
     return new Promise((resolve, reject) => {
         const pythonScript = generatePythonASTClass() + generatePythonMain(code);
         
@@ -1077,7 +1305,12 @@ function parsePythonWithAST(code: string): Promise<{mermaidCode: string, lineMap
             reject(error);
         }
         
-        function cleanupAndResolve(result: {mermaidCode: string, lineMapping: string, nodeSequence: string}) {
+        function cleanupAndResolve(result: {
+            mermaidCode: string, 
+            lineMapping: string, 
+            nodeSequence: string,
+            nodeMeta: string
+        }) {
             try {
                 fs.unlinkSync(tempScriptPath);
             } catch (cleanupError) {
@@ -1124,10 +1357,14 @@ function parsePythonWithAST(code: string): Promise<{mermaidCode: string, lineMap
                     const parts = output.trim().split('---LINE_MAPPING---');
                     const mermaidCode = parts[0].trim();
                     const afterMapping = parts[1]?.trim() || '{}';
-                    
+
                     const secondParts = afterMapping.split('---NODE_SEQUENCE---');
                     const lineMapping = secondParts[0].trim();
-                    const nodeSequence = secondParts[1]?.trim() || '[]';
+                    const afterSeq = secondParts[1]?.trim() || '[]';
+
+                    const thirdParts = afterSeq.split('---NODE_META---');
+                    const nodeSequence = thirdParts[0].trim();
+                    const nodeMeta = (thirdParts[1] ?? '{}').trim();
                     
                     console.log('Raw Python output line mapping:', lineMapping);
                     console.log('Raw Python output node sequence:', nodeSequence);
@@ -1135,7 +1372,8 @@ function parsePythonWithAST(code: string): Promise<{mermaidCode: string, lineMap
                     cleanupAndResolve({
                         mermaidCode: mermaidCode,
                         lineMapping: lineMapping,
-                        nodeSequence: nodeSequence
+                        nodeSequence: nodeSequence,
+                        nodeMeta: nodeMeta
                     });
                 }
             });
@@ -1171,401 +1409,54 @@ function parsePythonWithAST(code: string): Promise<{mermaidCode: string, lineMap
 
 
 
+// What is getNonce() and why we need it?
+// What: a tiny helper that generates a random string (the “nonce”).
+// Why: Your Webview uses a Content Security Policy (CSP) that blocks inline scripts unless they carry a matching nonce.
+// We put the same nonce in:
+// the CSP meta (script-src 'nonce-XYZ'), and
+// each <script nonce="XYZ"> tag.
+// This tells the Webview: “these inline scripts are allowed.”
+// A simple implementation in extension.ts:
+function getNonce(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let nonce = '';
+  for (let i = 0; i < 32; i++) {nonce += chars.charAt(Math.floor(Math.random() * chars.length));}
+  return nonce;
+}
 
 
 
 // Webview 內容（修改以包含新按鈕和動畫功能）
 // Webview 內容（修正版本）
-function getWebviewContent(mermaidCode: string, nodeOrder: string[]): string {
-    return `<!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Python Flowchart</title>
-        <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-                padding: 20px;
-                background-color: var(--vscode-editor-background);
-                color: var(--vscode-editor-foreground);
-            }
-            h1 {
-                color: var(--vscode-editor-foreground);
-                border-bottom: 2px solid var(--vscode-panel-border);
-                padding-bottom: 10px;
-            }
-            .controls {
-                margin: 20px 0;
-                display: flex;
-                gap: 10px;
-                flex-wrap: wrap;
-            }
-            button {
-                background-color: var(--vscode-button-background);
-                color: var(--vscode-button-foreground);
-                border: none;
-                padding: 8px 16px;
-                cursor: pointer;
-                border-radius: 4px;
-            }
-            button:hover {
-                background-color: var(--vscode-button-hoverBackground);
-            }
-            button:disabled {
-                opacity: 0.5;
-                cursor: not-allowed;
-            }
-            .animation-control {
-                background-color: #4CAF50;
-            }
-            .animation-control:hover {
-                background-color: #45a049;
-            }
-            .stop-button {
-                background-color: #f44336;
-            }
-            .stop-button:hover {
-                background-color: #da190b;
-            }
-            #mermaid-container {
-                background-color: white;
-                border-radius: 8px;
-                padding: 20px;
-                margin-top: 20px;
-                overflow: auto;
-                max-height: 80vh;
-            }
-            .mermaid {
-                text-align: center;
-            }
-            .legend {
-                margin-top: 20px;
-                padding: 15px;
-                background-color: var(--vscode-editor-inactiveSelectionBackground);
-                border-radius: 4px;
-            }
-            .legend h3 {
-                margin-top: 0;
-            }
-            .legend-item {
-                display: inline-block;
-                margin: 5px 10px;
-                padding: 5px 10px;
-                border-radius: 4px;
-            }
-            
-            /* 高亮樣式 - 保留原始顏色的發光效果 */
-            .highlighted rect,
-            .highlighted polygon,
-            .highlighted ellipse,
-            .highlighted path {
-                filter: drop-shadow(0 0 10px #FFC107) drop-shadow(0 0 20px #FFC107);
-                animation: glow 1.5s infinite;
-            }
-            
-            /* 動畫高亮樣式 - 不同顏色 */
-            .animation-highlighted rect,
-            .animation-highlighted polygon,
-            .animation-highlighted ellipse,
-            .animation-highlighted path {
-                filter: drop-shadow(0 0 10px #00BCD4) drop-shadow(0 0 20px #00BCD4);
-                animation: animationGlow 1s infinite;
-            }
-            
-            @keyframes glow {
-                0% {
-                    filter: drop-shadow(0 0 5px #FFC107) drop-shadow(0 0 10px #FFC107);
-                }
-                50% {
-                    filter: drop-shadow(0 0 15px #FFC107) drop-shadow(0 0 30px #FFC107);
-                }
-                100% {
-                    filter: drop-shadow(0 0 5px #FFC107) drop-shadow(0 0 10px #FFC107);
-                }
-            }
-            
-            @keyframes animationGlow {
-                0% {
-                    filter: drop-shadow(0 0 5px #00BCD4) drop-shadow(0 0 10px #00BCD4);
-                }
-                50% {
-                    filter: drop-shadow(0 0 20px #00BCD4) drop-shadow(0 0 35px #00BCD4);
-                }
-                100% {
-                    filter: drop-shadow(0 0 5px #00BCD4) drop-shadow(0 0 10px #00BCD4);
-                }
-            }
-            
-            .speed-control {
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                margin-top: 10px;
-            }
-            
-            .speed-slider {
-                width: 200px;
-            }
-            
-            .status-display {
-                margin-top: 10px;
-                padding: 10px;
-                background-color: var(--vscode-editor-inactiveSelectionBackground);
-                border-radius: 4px;
-                font-family: monospace;
-            }
-        </style>
-    </head>
-    <body>
-        <h1> PseudoChart</h1>
-        
-        <div class="controls">
-            <button onclick="zoomIn()"> Zoom In</button>
-            <button onclick="zoomOut()"> Zoom Out</button>
-            <button onclick="resetZoom()"> Reset</button>
-            <button onclick="exportSVG()"> Export SVG</button>
-            <button onclick="clearHighlight()"> Clear Highlight</button>
-            <button id="animateBtn" class="animation-control" onclick="startAnimation()">▶ Animate Flow</button>
-            <button id="stopBtn" class="stop-button" onclick="stopAnimation()" style="display: none;">⏹ Stop</button>
-        </div>
-        
-        <div class="speed-control">
-            <label for="speedSlider">Animation Speed:</label>
-            <input type="range" id="speedSlider" class="speed-slider" min="100" max="2000" value="500" step="100">
-            <span id="speedValue">500ms</span>
-        </div>
-        
-        <div id="statusDisplay" class="status-display" style="display: none;">
-            Current Node: <span id="currentNodeName">-</span>
-        </div>
-        
-        <div id="mermaid-container">
-            <div class="mermaid" id="flowchart">
-                ${mermaidCode}
-            </div>
-        </div>
-        
-        <div class="legend">
-            <h4> 功能說明：</h4>
-            <ul>
-                <li>虛線箭頭 (- - ->) 加上 "calls" 表示函式呼叫關係</li>
-                <li>點擊左側程式碼行，右側對應的流程圖節點會發光（黃色）</li>
-                <li>點擊 "Animate Flow" 按鈕，按順序展示程式執行流程（藍色發光）</li>
-                <li>調整 Animation Speed 滑桿來控制動畫速度</li>
-            </ul>
-        </div>
-        
-        <script>
-            const vscode = acquireVsCodeApi();
-            let currentScale = 1;
-            let currentHighlightedNodes = [];
-            let animationNodes = [];
-            let animationTimer = null;
-            let animationIndex = 0;
-            let nodeOrder = ${JSON.stringify(nodeOrder)};
-            
-            // 速度滑桿控制
-            const speedSlider = document.getElementById('speedSlider');
-            const speedValue = document.getElementById('speedValue');
-            speedSlider.addEventListener('input', (e) => {
-                speedValue.textContent = e.target.value + 'ms';
-            });
-            
-            mermaid.initialize({ 
-                startOnLoad: true,
-                theme: 'default',
-                flowchart: {
-                    useMaxWidth: true,
-                    htmlLabels: true,
-                    curve: 'basis'
-                },
-                securityLevel: 'loose'
-            });
-            
-            // 當 Mermaid 完成渲染後設置
-            mermaid.init(undefined, document.querySelector('.mermaid')).then(() => {
-                console.log('Mermaid initialized, node order:', nodeOrder);
-            });
-            
-            function findNodeElement(nodeId) {
-                const elements = document.querySelectorAll(\`.node\`);
-                for (const el of elements) {
-                    const elementId = el.id;
-                    if (elementId) {
-                        const idParts = elementId.split('-');
-                        if (idParts.length >= 2) {
-                            const extractedId = idParts[1];
-                            if (extractedId === nodeId || 
-                                (nodeId.startsWith('func_') && elementId.includes(nodeId)) ||
-                                (nodeId === 'Start' && elementId.includes('Start')) ||
-                                (nodeId === 'End' && elementId.includes('End'))) {
-                                return el;
-                            }
-                        }
-                    }
-                }
-                return null;
-            }
-            
-            function highlightNodes(nodeIds) {
-                //清除之前的高亮
-                clearHighlight();
-                
-                console.log('Highlighting nodes:', nodeIds);
-                
-                //高亮新的節點
-                nodeIds.forEach(nodeId => {
-                    const element = findNodeElement(nodeId);
-                    if (element) {
-                        element.classList.add('highlighted');
-                        currentHighlightedNodes.push(element);
-                        console.log('Highlighted element:', element.id);
-                    }
-                });
-                
-                if (currentHighlightedNodes.length === 0) {
-                    console.log('No nodes found to highlight');
-                }
-            }
-            
-            function clearHighlight() {
-                // 移除所有高亮
-                currentHighlightedNodes.forEach(el => {
-                    el.classList.remove('highlighted');
-                });
-                currentHighlightedNodes = [];
-            }
-            
-            function clearAnimationHighlight() {
-                // 移除所有動畫高亮
-                animationNodes.forEach(el => {
-                    el.classList.remove('animation-highlighted');
-                });
-                animationNodes = [];
-            }
-            
-            function animateNode(nodeId) {
-                clearAnimationHighlight();
-                
-                const element = findNodeElement(nodeId);
-                if (element) {
-                    element.classList.add('animation-highlighted');
-                    animationNodes.push(element);
-                    
-                    // 更新狀態顯示
-                    const statusDisplay = document.getElementById('statusDisplay');
-                    const currentNodeName = document.getElementById('currentNodeName');
-                    statusDisplay.style.display = 'block';
-                    
-                    // 從節點中提取文字內容
-                    const textElement = element.querySelector('text') || element.querySelector('.nodeLabel');
-                    if (textElement) {
-                        currentNodeName.textContent = nodeId + ': ' + textElement.textContent;
-                    } else {
-                        currentNodeName.textContent = nodeId;
-                    }
-                    
-                    // 滾動到當前節點
-                    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-            }
-            
-            function startAnimation() {
-                if (animationTimer) {
-                    stopAnimation();
-                }
-                
-                animationIndex = 0;
-                const animateBtn = document.getElementById('animateBtn');
-                const stopBtn = document.getElementById('stopBtn');
-                animateBtn.style.display = 'none';
-                stopBtn.style.display = 'inline-block';
-                
-                const speed = parseInt(speedSlider.value);
-                
-                function nextNode() {
-                    if (animationIndex < nodeOrder.length) {
-                        animateNode(nodeOrder[animationIndex]);
-                        animationIndex++;
-                        animationTimer = setTimeout(nextNode, speed);
-                    } else {
-                        // 動畫結束
-                        stopAnimation();
-                    }
-                }
-                
-                nextNode();
-            }
-            
-            function stopAnimation() {
-                if (animationTimer) {
-                    clearTimeout(animationTimer);
-                    animationTimer = null;
-                }
-                
-                clearAnimationHighlight();
-                
-                const animateBtn = document.getElementById('animateBtn');
-                const stopBtn = document.getElementById('stopBtn');
-                animateBtn.style.display = 'inline-block';
-                stopBtn.style.display = 'none';
-                
-                // 隱藏狀態顯示
-                const statusDisplay = document.getElementById('statusDisplay');
-                statusDisplay.style.display = 'none';
-            }
-            
-            // 監聽來自擴展的消息
-            window.addEventListener('message', event => {
-                const message = event.data;
-                switch (message.command) {
-                    case 'highlightNodes':
-                        // 如果正在播放動畫，先停止
-                        if (animationTimer) {
-                            stopAnimation();
-                        }
-                        highlightNodes(message.nodeIds);
-                        break;
-                    case 'clearHighlight':
-                        clearHighlight();
-                        break;
-                    case 'setNodeOrder':
-                        nodeOrder = message.nodeOrder;
-                        console.log('Updated node order:', nodeOrder);
-                        break;
-                }
-            });
-            
-            function zoomIn() {
-                currentScale += 0.1;
-                document.querySelector('.mermaid').style.transform = \`scale(\${currentScale})\`;
-            }
-            
-            function zoomOut() {
-                currentScale = Math.max(0.5, currentScale - 0.1);
-                document.querySelector('.mermaid').style.transform = \`scale(\${currentScale})\`;
-            }
-            
-            function resetZoom() {
-                currentScale = 1;
-                document.querySelector('.mermaid').style.transform = 'scale(1)';
-            }
-            
-            function exportSVG() {
-                const svg = document.querySelector('.mermaid svg');
-                const svgData = new XMLSerializer().serializeToString(svg);
-                const blob = new Blob([svgData], { type: 'image/svg+xml' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'python-flowchart.svg';
-                a.click();
-            }
-        </script>
-    </body>
-    </html>`;
+// turn into load from 'media/flowview.html'
+async function getWebviewHtmlExternal(
+    webview: vscode.Webview,
+    context: vscode.ExtensionContext,
+    mermaidCode: string,
+    nodeOrder: string[]
+): Promise<string> {
+    // 1) read the template file
+    const templateUri = vscode.Uri.joinPath(context.extensionUri, 'media', 'flowview.html');
+    const bytes = await vscode.workspace.fs.readFile(templateUri);
+    let html = new TextDecoder('utf-8').decode(bytes);
+
+    // 2) build URIs & nonce
+    const mermaidUri = webview.asWebviewUri(
+        vscode.Uri.joinPath(context.extensionUri, 'media', 'mermaid.min.js')
+    );
+    // check mermaid log success
+    console.log('Mermaid URI:', mermaidUri.toString());
+    const nonce = getNonce();
+
+    // 3) replace placeholders
+    html = html
+        .replace(/%%CSP_SOURCE%%/g, webview.cspSource)
+        .replace(/%%NONCE%%/g, nonce)
+        .replace(/%%MERMAID_JS_URI%%/g, mermaidUri.toString())
+        .replace(/%%MERMAID_CODE%%/g, mermaidCode)
+        .replace(/%%NODE_ORDER_JSON%%/g, JSON.stringify(nodeOrder));
+
+    return html;
 }
 
 export function deactivate() {

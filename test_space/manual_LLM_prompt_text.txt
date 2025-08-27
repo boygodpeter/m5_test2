@@ -1,0 +1,278 @@
+Task: Determine the actual execution path for the code below and emit it as JSON.
+
+Rules:
+- Output MUST be valid JSON (UTF-8, double quotes, no trailing commas).
+- Include every statement that is actually executed in order.
+- For condition nodes, include the boolean result.
+- Include any printed outputs in the order they occur.
+- Do not include nodes that are never reached.
+
+Schema (exact keys):
+{
+  "executed_orders": number[],             // order indices from my node list, in execution order
+}
+
+Full code:
+```python
+a = 1
+b = 2
+c = 3
+
+if(a == 1):
+    if(b == 1):
+        if(c==1):
+            print('1')
+        elif(c==2):
+            print('2')
+        else:
+            print('3')
+    elif(b==2):
+        if(c==1):
+            print('4')
+        elif(c==2):
+            print('5')
+        else:
+            print('6')
+    else:
+        if(c==1):
+            print('7')
+        elif(c==2):
+            print('8')
+        else:
+            print('9')
+elif(a == 2):
+    if(b == 1):
+        if(c==1):
+            print('1')
+        elif(c==2):
+            print('2')
+        else:
+            print('3')
+    elif(b==2):
+        if(c==1):
+            print('4')
+        elif(c==2):
+            print('5')
+        else:
+            print('6')
+    else:
+        if(c==1):
+            print('7')
+        elif(c==2):
+            print('8')
+        else:
+            print('9')
+```
+
+JSON payload follows (triple backticks):
+```json
+{
+  "ordered": [
+    {
+      "nodeId": "Start",
+      "line": null,
+      "statement": "Start"
+    },
+    {
+      "nodeId": "node1",
+      "line": 1,
+      "statement": "a = 1"
+    },
+    {
+      "nodeId": "node2",
+      "line": 2,
+      "statement": "b = 2"
+    },
+    {
+      "nodeId": "node3",
+      "line": 3,
+      "statement": "c = 3"
+    },
+    {
+      "nodeId": "node4",
+      "line": 5,
+      "statement": "if a == 1"
+    },
+    {
+      "nodeId": "node5",
+      "line": 6,
+      "statement": "if b == 1"
+    },
+    {
+      "nodeId": "node6",
+      "line": 7,
+      "statement": "if c == 1"
+    },
+    {
+      "nodeId": "node7",
+      "line": 8,
+      "statement": "print('1')"
+    },
+    {
+      "nodeId": "node8",
+      "line": 9,
+      "statement": "if c == 2"
+    },
+    {
+      "nodeId": "node9",
+      "line": 10,
+      "statement": "print('2')"
+    },
+    {
+      "nodeId": "node10",
+      "line": 12,
+      "statement": "print('3')"
+    },
+    {
+      "nodeId": "node11",
+      "line": 13,
+      "statement": "if b == 2"
+    },
+    {
+      "nodeId": "node12",
+      "line": 14,
+      "statement": "if c == 1"
+    },
+    {
+      "nodeId": "node13",
+      "line": 15,
+      "statement": "print('4')"
+    },
+    {
+      "nodeId": "node14",
+      "line": 16,
+      "statement": "if c == 2"
+    },
+    {
+      "nodeId": "node15",
+      "line": 17,
+      "statement": "print('5')"
+    },
+    {
+      "nodeId": "node16",
+      "line": 19,
+      "statement": "print('6')"
+    },
+    {
+      "nodeId": "node17",
+      "line": 21,
+      "statement": "if c == 1"
+    },
+    {
+      "nodeId": "node18",
+      "line": 22,
+      "statement": "print('7')"
+    },
+    {
+      "nodeId": "node19",
+      "line": 23,
+      "statement": "if c == 2"
+    },
+    {
+      "nodeId": "node20",
+      "line": 24,
+      "statement": "print('8')"
+    },
+    {
+      "nodeId": "node21",
+      "line": 26,
+      "statement": "print('9')"
+    },
+    {
+      "nodeId": "node22",
+      "line": 27,
+      "statement": "if a == 2"
+    },
+    {
+      "nodeId": "node23",
+      "line": 28,
+      "statement": "if b == 1"
+    },
+    {
+      "nodeId": "node24",
+      "line": 29,
+      "statement": "if c == 1"
+    },
+    {
+      "nodeId": "node25",
+      "line": 30,
+      "statement": "print('1')"
+    },
+    {
+      "nodeId": "node26",
+      "line": 31,
+      "statement": "if c == 2"
+    },
+    {
+      "nodeId": "node27",
+      "line": 32,
+      "statement": "print('2')"
+    },
+    {
+      "nodeId": "node28",
+      "line": 34,
+      "statement": "print('3')"
+    },
+    {
+      "nodeId": "node29",
+      "line": 35,
+      "statement": "if b == 2"
+    },
+    {
+      "nodeId": "node30",
+      "line": 36,
+      "statement": "if c == 1"
+    },
+    {
+      "nodeId": "node31",
+      "line": 37,
+      "statement": "print('4')"
+    },
+    {
+      "nodeId": "node32",
+      "line": 38,
+      "statement": "if c == 2"
+    },
+    {
+      "nodeId": "node33",
+      "line": 39,
+      "statement": "print('5')"
+    },
+    {
+      "nodeId": "node34",
+      "line": 41,
+      "statement": "print('6')"
+    },
+    {
+      "nodeId": "node35",
+      "line": 43,
+      "statement": "if c == 1"
+    },
+    {
+      "nodeId": "node36",
+      "line": 44,
+      "statement": "print('7')"
+    },
+    {
+      "nodeId": "node37",
+      "line": 45,
+      "statement": "if c == 2"
+    },
+    {
+      "nodeId": "node38",
+      "line": 46,
+      "statement": "print('8')"
+    },
+    {
+      "nodeId": "node39",
+      "line": 48,
+      "statement": "print('9')"
+    },
+    {
+      "nodeId": "End",
+      "line": null,
+      "statement": "End"
+    }
+  ]
+}
+```

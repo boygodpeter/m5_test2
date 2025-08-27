@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <!-- Add a CSP meta (first <head> section), so inline scripts can run with a nonce in VS Code Webview -->
+    <!-- A nonce only allows inline scripts. It does not whitelist external scripts. Your mermaid URI is:-->
+    <!-- https://file+.vscode-resource.vscode-cdn.net/.../media/mermaid.min.js -->
+    <!-- For VS Code webviews, you must also allow the webview’s origin via %%CSP_SOURCE%%. -->
+    <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none';
+            img-src %%CSP_SOURCE%% data:;
+            script-src %%CSP_SOURCE%% 'nonce-%%NONCE%%';
+            style-src %%CSP_SOURCE%% 'unsafe-inline';
+            font-src %%CSP_SOURCE%%;">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Python Flowchart</title>
+    <!-- <script nonce="%%NONCE%%" src="%%MERMAID_JS_URI%%"></script> -->
+    <!-- Use defer so it executes after parsing the HTML but before DOMContentLoaded fires. (This doesn’t weaken CSP and avoids “ran too early” surprises.) -->
+    <script nonce="%%NONCE%%" src="%%MERMAID_JS_URI%%" defer
+        onload="console.log('mermaid.js loaded OK:', this.src)"
+        onerror="console.error('mermaid.js failed to load:', this.src)">
+    </script>
+
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            background-color: var(--vscode-editor-background);
+            color: var(--vscode-editor-foreground);
+        }
+        h1 {
+            color: var(--vscode-editor-foreground);
+            border-bottom: 2px solid var(--vscode-panel-border);
+            padding-bottom: 10px;
+        }
+        .controls {
+            margin: 20px 0;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        button {
+            background-color: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            padding: 8px 16px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        button:hover {
+            background-color: var(--vscode-button-hoverBackground);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .animation-control {
+            background-color: #4CAF50;
+        }
+        .animation-control:hover {
+            background-color: #45a049;
+        }
+        .stop-button {
+            background-color: #f44336;
+        }
+        .stop-button:hover {
+            background-color: #da190b;
+        }
+        #mermaid-container {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+            overflow: auto;
+            max-height: 80vh;
+        }
+        .mermaid {
+            text-align: center;
+        }
+        .legend {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: var(--vscode-editor-inactiveSelectionBackground);
+            border-radius: 4px;
+        }
+        .legend h3 {
+            margin-top: 0;
+        }
+        .legend-item {
+            display: inline-block;
+            margin: 5px 10px;
+            padding: 5px 10px;
+            border-radius: 4px;
+        }
+        
+        /* 高亮樣式 - 保留原始顏色的發光效果 */
+        .highlighted rect,
+        .highlighted polygon,
+        .highlighted ellipse,
+        .highlighted path {
+            filter: drop-shadow(0 0 10px #FFC107) drop-shadow(0 0 20px #FFC107);
+            animation: glow 1.5s infinite;
+        }
+        
+        /* 動畫高亮樣式 - 不同顏色 */
+        .animation-highlighted rect,
+        .animation-highlighted polygon,
+        .animation-highlighted ellipse,
+        .animation-highlighted path {
+            filter: drop-shadow(0 0 10px #00BCD4) drop-shadow(0 0 20px #00BCD4);
+            animation: animationGlow 1s infinite;
+        }
+        
+        @keyframes glow {
+            0% {
+                filter: drop-shadow(0 0 5px #FFC107) drop-shadow(0 0 10px #FFC107);
+            }
+            50% {
+                filter: drop-shadow(0 0 15px #FFC107) drop-shadow(0 0 30px #FFC107);
+            }
+            100% {
+                filter: drop-shadow(0 0 5px #FFC107) drop-shadow(0 0 10px #FFC107);
+            }
+        }
+        
+        @keyframes animationGlow {
+            0% {
+                filter: drop-shadow(0 0 5px #00BCD4) drop-shadow(0 0 10px #00BCD4);
+            }
+            50% {
+                filter: drop-shadow(0 0 20px #00BCD4) drop-shadow(0 0 35px #00BCD4);
+            }
+            100% {
+                filter: drop-shadow(0 0 5px #00BCD4) drop-shadow(0 0 10px #00BCD4);
+            }
+        }
+        
+        .speed-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .speed-slider {
+            width: 200px;
+        }
+        
+        .status-display {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: var(--vscode-editor-inactiveSelectionBackground);
+            border-radius: 4px;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+        <h1> PseudoChart</h1>
+        
+        <!-- <div class="controls">
+            <button onclick="zoomIn()"> Zoom In</button>
+            <button onclick="zoomOut()"> Zoom Out</button>
+            <button onclick="resetZoom()"> Reset</button>
+            <button onclick="exportSVG()"> Export SVG</button>
+            <button onclick="clearHighlight()"> Clear Highlight</button>
+            <button id="animateBtn" class="animation-control" onclick="startAnimation()">▶ Animate Flow</button>
+            <button id="stopBtn" class="stop-button" onclick="stopAnimation()" style="display: none;">⏹ Stop</button>
+        </div> -->
+        <div class="controls">
+            <button id="btnZoomIn"> Zoom In</button>
+            <button id="btnZoomOut"> Zoom Out</button>
+            <button id="btnReset"> Reset</button>
+            <button id="btnExport"> Export SVG</button>
+            <button id="btnClear"> Clear Highlight</button>
+            <button id="animateBtn" class="animation-control">▶ Animate Flow</button>
+            <button id="stopBtn" class="stop-button" style="display:none;">⏹ Stop</button>
+        </div>
+        <!-- each button must related to a EventListener; otherwise not work -->
+        
+        <div class="speed-control">
+            <label for="speedSlider">Animation Speed:</label>
+            <input type="range" id="speedSlider" class="speed-slider" min="100" max="2000" value="500" step="100">
+            <span id="speedValue">500ms</span>
+        </div>
+        
+        <div id="statusDisplay" class="status-display" style="display: none;">
+            Current Node: <span id="currentNodeName">-</span>
+        </div>
+        
+        <div id="mermaid-container">
+            <!-- turn into outter file, use placeholder, and replace when load into 'extension.ts' -->
+            <div class="mermaid" id="flowchart">%%MERMAID_CODE%%</div>
+        </div>
+        
+        <div class="legend">
+            <h4> 功能說明：</h4>
+            <ul>
+                <li>虛線箭頭 (- - ->) 加上 "calls" 表示函式呼叫關係</li>
+                <li>點擊左側程式碼行，右側對應的流程圖節點會發光（黃色）</li>
+                <li>點擊 "Animate Flow" 按鈕，按順序展示程式執行流程（藍色發光）</li>
+                <li>調整 Animation Speed 滑桿來控制動畫速度</li>
+            </ul>
+        </div>
+
+    <!-- turn into outter file, use placeholder, and replace when load into 'extension.ts' -->
+    <!-- all script need nonce tag to pass security limit in extension.ts -->
+    <!-- check comment of getNonce() in extension.ts -->
+    <script type="application/json" id="node-order-json" nonce="%%NONCE%%">%%NODE_ORDER_JSON%%</script>    
+    <script nonce="%%NONCE%%">
+            // Using Eventlistener, instead of onclick
+
+            // “Refused to execute inline event handler …”
+            // → your CSP is blocking inline onclick="..."
+            //   etc. (nonce does not whitelist inline
+            //   event attributes).
+
+            document.getElementById('btnZoomIn').addEventListener('click', zoomIn);
+            document.getElementById('btnZoomOut').addEventListener('click', zoomOut);
+            document.getElementById('btnReset').addEventListener('click', resetZoom);
+            document.getElementById('btnExport').addEventListener('click', exportSVG);
+            document.getElementById('btnClear').addEventListener('click', clearHighlight);
+            document.getElementById('animateBtn').addEventListener('click', startAnimation);
+            document.getElementById('stopBtn').addEventListener('click', stopAnimation);
+
+            const vscode = acquireVsCodeApi();
+            let currentScale = 1;
+            let currentHighlightedNodes = [];
+            let animationNodes = [];
+            let animationTimer = null;
+            let animationIndex = 0;
+
+            // <!-- turn into outter file, use placeholder, and replace when load into 'extension.ts' -->
+            const nodeOrderJsonTag = document.getElementById('node-order-json');
+            let nodeOrder = [];
+            try {
+                nodeOrder = JSON.parse(nodeOrderJsonTag?.textContent || '[]');
+            } catch (_) {
+                nodeOrder = [];
+            }
+
+            
+            // 速度滑桿控制
+            const speedSlider = document.getElementById('speedSlider');
+            const speedValue = document.getElementById('speedValue');
+            speedSlider.addEventListener('input', (e) => {
+                speedValue.textContent = e.target.value + 'ms';
+            });
+            
+            function initMermaidSafe() {
+                if (typeof mermaid === 'undefined') {
+                    console.error('Mermaid not loaded');
+                    return;
+                }
+                
+                 mermaid.initialize({ 
+                    startOnLoad: true,
+                    theme: 'default',
+                    flowchart: {
+                        useMaxWidth: true,
+                        htmlLabels: true,
+                        curve: 'basis'
+                    },
+                    securityLevel: 'loose'
+                });
+                
+                // 當 Mermaid 完成渲染後設置
+                mermaid.init(undefined, document.querySelector('.mermaid')).then(() => {
+                    console.log('Mermaid initialized, node order:', nodeOrder);
+                });
+            }
+
+            // Run after DOM is parsed (deferred external scripts will have executed by now)
+            document.addEventListener('DOMContentLoaded', initMermaidSafe);
+            
+            function findNodeElement(nodeId) {
+                const elements = document.querySelectorAll('.node');
+                for (const el of elements) {
+                    const elementId = el.id;
+                    if (elementId) {
+                        const idParts = elementId.split('-');
+                        if (idParts.length >= 2) {
+                            const extractedId = idParts[1];
+                            if (extractedId === nodeId || 
+                                (nodeId.startsWith('func_') && elementId.includes(nodeId)) ||
+                                (nodeId === 'Start' && elementId.includes('Start')) ||
+                                (nodeId === 'End' && elementId.includes('End'))) {
+                                return el;
+                            }
+                        }
+                    }
+                }
+                return null;
+            }
+            
+            function highlightNodes(nodeIds) {
+                //清除之前的高亮
+                clearHighlight();
+                
+                console.log('Highlighting nodes:', nodeIds);
+                
+                //高亮新的節點
+                nodeIds.forEach(nodeId => {
+                    const element = findNodeElement(nodeId);
+                    if (element) {
+                        element.classList.add('highlighted');
+                        currentHighlightedNodes.push(element);
+                        console.log('Highlighted element:', element.id);
+                    }
+                });
+                
+                if (currentHighlightedNodes.length === 0) {
+                    console.log('No nodes found to highlight');
+                }
+            }
+            
+            function clearHighlight() {
+                // 移除所有高亮
+                currentHighlightedNodes.forEach(el => {
+                    el.classList.remove('highlighted');
+                });
+                currentHighlightedNodes = [];
+            }
+            
+            function clearAnimationHighlight() {
+                // 移除所有動畫高亮
+                animationNodes.forEach(el => {
+                    el.classList.remove('animation-highlighted');
+                });
+                animationNodes = [];
+            }
+            
+            function animateNode(nodeId) {
+                clearAnimationHighlight();
+                
+                const element = findNodeElement(nodeId);
+                if (element) {
+                    element.classList.add('animation-highlighted');
+                    animationNodes.push(element);
+                    
+                    // 更新狀態顯示
+                    const statusDisplay = document.getElementById('statusDisplay');
+                    const currentNodeName = document.getElementById('currentNodeName');
+                    statusDisplay.style.display = 'block';
+                    
+                    // 從節點中提取文字內容
+                    const textElement = element.querySelector('text') || element.querySelector('.nodeLabel');
+                    if (textElement) {
+                        currentNodeName.textContent = nodeId + ': ' + textElement.textContent;
+                    } else {
+                        currentNodeName.textContent = nodeId;
+                    }
+                    
+                    // 滾動到當前節點
+                    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }
+            
+            function startAnimation() {
+                if (animationTimer) {
+                    stopAnimation();
+                }
+                
+                animationIndex = 0;
+                const animateBtn = document.getElementById('animateBtn');
+                const stopBtn = document.getElementById('stopBtn');
+                animateBtn.style.display = 'none';
+                stopBtn.style.display = 'inline-block';
+                
+                const speed = parseInt(speedSlider.value);
+                
+                function nextNode() {
+                    if (animationIndex < nodeOrder.length) {
+                        animateNode(nodeOrder[animationIndex]);
+                        animationIndex++;
+                        animationTimer = setTimeout(nextNode, speed);
+                    } else {
+                        // 動畫結束
+                        stopAnimation();
+                    }
+                }
+                
+                nextNode();
+            }
+            
+            function stopAnimation() {
+                if (animationTimer) {
+                    clearTimeout(animationTimer);
+                    animationTimer = null;
+                }
+                
+                clearAnimationHighlight();
+                
+                const animateBtn = document.getElementById('animateBtn');
+                const stopBtn = document.getElementById('stopBtn');
+                animateBtn.style.display = 'inline-block';
+                stopBtn.style.display = 'none';
+                
+                // 隱藏狀態顯示
+                const statusDisplay = document.getElementById('statusDisplay');
+                statusDisplay.style.display = 'none';
+            }
+            
+            // 監聽來自擴展的消息
+            window.addEventListener('message', event => {
+                const message = event.data;
+                switch (message.command) {
+                    case 'highlightNodes':
+                        // 如果正在播放動畫，先停止
+                        if (animationTimer) {
+                            stopAnimation();
+                        }
+                        highlightNodes(message.nodeIds);
+                        break;
+                    case 'clearHighlight':
+                        clearHighlight();
+                        break;
+                    case 'setNodeOrder':
+                        nodeOrder = message.nodeOrder;
+                        console.log('Updated node order:', nodeOrder);
+                        break;
+                }
+            });
+            
+            function zoomIn() {
+                currentScale += 0.1;
+                // document.querySelector('.mermaid').style.transform = 'scale(\${currentScale})';
+                document.querySelector('.mermaid').style.transform = 'scale(' + currentScale + ')';
+            }
+            
+            function zoomOut() {
+                currentScale = Math.max(0.5, currentScale - 0.1);
+                // document.querySelector('.mermaid').style.transform = 'scale(\${currentScale})';
+                document.querySelector('.mermaid').style.transform = 'scale(' + currentScale + ')';
+            }
+            
+            function resetZoom() {
+                currentScale = 1;
+                document.querySelector('.mermaid').style.transform = 'scale(1)';
+            }
+            
+            function exportSVG() {
+                const svg = document.querySelector('.mermaid svg');
+                const svgData = new XMLSerializer().serializeToString(svg);
+                const blob = new Blob([svgData], { type: 'image/svg+xml' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'python-flowchart.svg';
+                a.click();
+            }
+    </script>
+</body>
+</html>
